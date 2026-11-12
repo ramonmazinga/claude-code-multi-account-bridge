@@ -927,6 +927,9 @@ class UnwritableLeafTest(TreeCase):
         leaf = leaf or self.b
         os.chmod(leaf, mode)
         self.addCleanup(os.chmod, leaf, 0o700)
+        # A full backup copies the leaf's mode too, which the base cleanup's
+        # rmtree cannot get through; this runs first (cleanups are LIFO).
+        self.addCleanup(bridge._make_writable, self.state_dir)
         return leaf
 
     def backups(self):
