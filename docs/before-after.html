@@ -1,0 +1,152 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --paper: #F7F5F0;
+    --panel: #FFFFFF;
+    --line: #E2DED5;
+    --ink: #1E1D1A;
+    --muted: #77736A;
+    --ghost: #B9B4A8;
+    --a: #D9622B;      /* sessions started on account A */
+    --b: #1F7A8C;      /* sessions started on account B */
+    --ok: #2E7D4F;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1200px; height: 540px; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--paper);
+    -webkit-font-smoothing: antialiased;
+    padding: 34px 44px 0 44px;
+    position: relative;
+  }
+  .stage { display: grid; grid-template-columns: 1fr 76px 1fr; align-items: start; }
+  .side h2 { font-size: 13px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; }
+  .side p.sub { font-size: 19px; line-height: 1.25; font-weight: 600; margin-top: 6px; letter-spacing: -.01em; }
+  .before h2 { color: var(--muted); }
+  .after h2 { color: var(--ok); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 22px; }
+
+  .sidebar {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px 10px 10px 10px;
+    box-shadow: 0 1px 0 rgba(30,29,26,.03), 0 10px 24px -18px rgba(30,29,26,.35);
+  }
+  .who { display: flex; align-items: center; gap: 9px; padding: 2px 6px 11px 6px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+  .avatar { width: 26px; height: 26px; border-radius: 50%; color: #fff; font-weight: 700; font-size: 13px; display: grid; place-items: center; }
+  .avatar.a { background: var(--a); }
+  .avatar.b { background: var(--b); }
+  .who .name { font-size: 14px; font-weight: 650; line-height: 1.1; }
+  .who .state { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .row { display: flex; align-items: center; gap: 9px; height: 36px; padding: 0 8px; border-radius: 8px; font-size: 13.5px; }
+  .row + .row { margin-top: 3px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot.a { background: var(--a); }
+  .dot.b { background: var(--b); }
+  .row .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row.ghost { border: 1.5px dashed var(--ghost); color: var(--ghost); background: transparent; }
+  .row.ghost .dot { background: transparent; border: 1.5px solid var(--ghost); }
+  .row.ghost .t { font-style: italic; }
+  .row.new { background: #EEF6F0; }
+
+  .arrow { padding-top: 176px; }
+  .arrow svg { width: 52px; height: 52px; display: block; margin: 0 auto; }
+
+  .legend { display: flex; gap: 22px; margin-top: 16px; font-size: 12.5px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+
+  .foot {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 74px;
+    border-top: 1px solid var(--line); background: #FFFFFF;
+    display: grid; grid-template-columns: repeat(3, 1fr); align-items: center; padding: 0 44px; gap: 24px;
+  }
+  .fact { display: flex; align-items: center; gap: 12px; font-size: 14.5px; line-height: 1.25; font-weight: 550; }
+  .fact svg { width: 26px; height: 26px; flex: none; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="side before">
+      <h2>Without the bridge</h2>
+      <p class="sub">Each account lists only the sessions started on it.</p>
+      <div class="pair">
+        <div class="sidebar">
+          <div class="who"><div class="avatar a">A</div><div><div class="name">Account A</div><div class="state">signed in</div></div></div>
+          <div class="row"><span class="dot a"></span><span class="t">Fix checkout bug</span></div>
+          <div class="row"><span class="dot a"></span><span class="t">Migrate users table</span></div>
+          <div class="row"><span class="dot a"></span><span class="t">Release notes 2.4</span></div>
+          <div class="row ghost"><span class="dot"></span><span class="t">not listed</span></div>
+          <div class="row ghost"><span class="dot"></span><span class="t">not listed</span></div>
+        </div>
+        <div class="sidebar">
+          <div class="who"><div class="avatar b">B</div><div><div class="name">Account B</div><div class="state">after you switch</div></div></div>
+          <div class="row ghost"><span class="dot"></span><span class="t">not listed</span></div>
+          <div class="row ghost"><span class="dot"></span><span class="t">not listed</span></div>
+          <div class="row ghost"><span class="dot"></span><span class="t">not listed</span></div>
+          <div class="row"><span class="dot b"></span><span class="t">Landing page copy</span></div>
+          <div class="row"><span class="dot b"></span><span class="t">Refactor auth flow</span></div>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="dot a"></i>started on A</span>
+        <span><i class="dot b"></i>started on B</span>
+        <span>still on disk, just not in the list</span>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg viewBox="0 0 52 52" fill="none" stroke="#1E1D1A" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 26h34"/><path d="M30 13l13 13-13 13"/>
+      </svg>
+    </div>
+
+    <div class="side after">
+      <h2>With the bridge</h2>
+      <p class="sub">Every account lists every session, all the time.</p>
+      <div class="pair">
+        <div class="sidebar">
+          <div class="who"><div class="avatar a">A</div><div><div class="name">Account A</div><div class="state">signed in</div></div></div>
+          <div class="row"><span class="dot a"></span><span class="t">Fix checkout bug</span></div>
+          <div class="row"><span class="dot a"></span><span class="t">Migrate users table</span></div>
+          <div class="row"><span class="dot a"></span><span class="t">Release notes 2.4</span></div>
+          <div class="row new"><span class="dot b"></span><span class="t">Landing page copy</span></div>
+          <div class="row new"><span class="dot b"></span><span class="t">Refactor auth flow</span></div>
+        </div>
+        <div class="sidebar">
+          <div class="who"><div class="avatar b">B</div><div><div class="name">Account B</div><div class="state">after you switch</div></div></div>
+          <div class="row new"><span class="dot a"></span><span class="t">Fix checkout bug</span></div>
+          <div class="row new"><span class="dot a"></span><span class="t">Migrate users table</span></div>
+          <div class="row new"><span class="dot a"></span><span class="t">Release notes 2.4</span></div>
+          <div class="row"><span class="dot b"></span><span class="t">Landing page copy</span></div>
+          <div class="row"><span class="dot b"></span><span class="t">Refactor auth flow</span></div>
+        </div>
+      </div>
+      <div class="legend">
+        <span>merged in the background, nothing to run when you switch</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="fact">
+      <svg viewBox="0 0 26 26" fill="none" stroke="#1E1D1A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h17"/><path d="M17 5l4 4-4 4"/><path d="M22 17H5"/><path d="M9 13l-4 4 4 4"/></svg>
+      <span>Merges both ways, newest copy wins</span>
+    </div>
+    <div class="fact">
+      <svg viewBox="0 0 26 26" fill="none" stroke="#1E1D1A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="18" height="5" rx="1.5"/><path d="M6 10v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-9"/><path d="M10.5 14.5h5"/></svg>
+      <span>Archives and deletes carry across accounts</span>
+    </div>
+    <div class="fact">
+      <svg viewBox="0 0 26 26" fill="none" stroke="#1E1D1A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="12" width="16" height="10" rx="2"/><path d="M9 12V9a4 4 0 0 1 8 0v3"/></svg>
+      <span>Never reads, stores or swaps a sign-in</span>
+    </div>
+  </div>
+</body>
+</html>

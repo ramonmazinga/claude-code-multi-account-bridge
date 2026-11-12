@@ -2,6 +2,8 @@
 
 One machine, two Claude accounts, one session list.
 
+![Without the bridge each account's Code sidebar lists only the sessions started on it; with the bridge every account lists every session](docs/before-after.png)
+
 ## The problem
 
 The Claude desktop app keeps its **Code** tab session list *per signed-in
