@@ -37,14 +37,15 @@ class PlistContentTest(unittest.TestCase):
 
     def test_program_arguments_use_usr_bin_python3_and_an_absolute_script(self):
         argv = self.plist()["ProgramArguments"]
-        self.assertEqual(argv, ["/usr/bin/python3", SCRIPT, "sync", "--execute"])
+        self.assertEqual(argv, ["/usr/bin/python3", SCRIPT, "sync", "--execute",
+                                "--trim-logs"])
         self.assertTrue(os.path.isabs(argv[1]))
 
     def test_program_arguments_carry_the_overrides_when_given(self):
         argv = self.plist(user_data="/synthetic/userData",
                           state_dir="/synthetic/state")["ProgramArguments"]
         self.assertEqual(argv, [
-            "/usr/bin/python3", SCRIPT, "sync", "--execute",
+            "/usr/bin/python3", SCRIPT, "sync", "--execute", "--trim-logs",
             "--user-data", "/synthetic/userData",
             "--state-dir", "/synthetic/state"])
 

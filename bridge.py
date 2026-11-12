@@ -72,6 +72,9 @@ launchd (macOS only):
   * WatchPaths fires the job when a watched directory's contents change;
     ThrottleInterval is the minimum seconds between launches (5 here);
     StartInterval additionally starts the job every N seconds (60 here).
+  * StandardOutPath / StandardErrorPath are opened in APPEND mode, so a log
+    trimmed in place (truncated, never replaced) goes on being written at its
+    new end by the running job.
   * plist files are XML with the -//Apple//DTD PLIST 1.0//EN doctype;
     plistlib.dumps() emits exactly that, so the XML is correct by
     construction rather than by string templating.
@@ -101,7 +104,7 @@ import stat
 import subprocess
 import sys
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 SESSIONS_DIRNAME = "claude-code-sessions"
 LABEL = "com.claude-code-multi-account-bridge"
@@ -232,7 +235,8 @@ class LeafState(object):
     take part in the merge as SOURCES — an unwritable leaf can still hold the
     newest copy — but the planner emits no write, no delete and no tombstone
     copy INTO it. Without this a 0555 leaf kept the plan non-empty for ever:
-    a full backup on every run, shredding the backup ring.
+    a backup on every run (a change set, once a day a full copy), shredding
+    the backup ring.
     """
 
     __slots__ = ("path", "records", "tombstones", "blocked", "blocked_ids",
@@ -643,12 +647,26 @@ TEMP_PREFIX = ".bridge-tmp-"
 BACKUPS_DIRNAME = "backups"
 LOCK_FILENAME = "bridge.lock"
 BACKUPS_KEPT = 10
+# One full copy of the tree a day; every other writing run saves only the files
+# it is about to overwrite or delete, in a `<stamp>-changes` folder. A full copy
+# per run made a busy day's ring cover minutes, at the tree's size each time.
+FULL_BACKUP_INTERVAL = datetime.timedelta(hours=24)
+CHANGES_SUFFIX = "-changes"
+CHANGES_KEPT = 1000
+# Fixed width and UTC, so plain name order is chronological order.
+STAMP_FORMAT = "%Y%m%dT%H%M%S%fZ"
+STAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{12}Z$")
+# A backup is copied under this prefix and renamed to its stamp only once the
+# copy is complete, so a run killed partway never leaves a half copy that looks
+# like a backup; the next prune removes the leftover.
+PARTIAL_PREFIX = ".partial-"
 
 SyncResult = collections.namedtuple(
     "SyncResult", "plan backup applied backup_skipped")
 
-# What take_backup made: the directory, and how many paths it deliberately left
-# out because discovery had already reported them as unreadable (R2-NB2).
+# What take_backup or backup_changes made: the directory (None when nothing
+# needed saving), and how many paths it deliberately left out because discovery
+# had already reported them as unreadable (R2-NB2; always 0 for a change set).
 Backup = collections.namedtuple("Backup", "path skipped")
 
 
@@ -925,51 +943,204 @@ def take_backup(root, state_dir, now=None, skip_paths=()):
     # timezone-aware UTC: datetime.utcnow() is deprecated from 3.12 on, and
     # the fixed-width stamp makes plain name sorting chronological.
     stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime(
-        "%Y%m%dT%H%M%S%fZ")
+        STAMP_FORMAT)
     destination = os.path.join(backups_root, stamp)
+    partial = os.path.join(backups_root, PARTIAL_PREFIX + stamp)
     skipped = []
     try:
         try:
-            shutil.copytree(root, os.path.join(destination, SESSIONS_DIRNAME),
+            shutil.copytree(root, os.path.join(partial, SESSIONS_DIRNAME),
                             symlinks=True,
                             ignore=_skip_paths_ignore(skip_paths, skipped))
+            os.rename(partial, destination)
         except OSError as error:
             LOGGER.error("backup of %s failed, nothing will be applied: %s",
                          root, error)
             # Remove the half-written directory BEFORE pruning: its name sorts
             # newest, so a prune that ran first would keep the corpse and
             # delete a good backup to make room for it.
-            _force_rmtree(destination)
+            _force_rmtree(partial)
             return None
     finally:
-        prune_backups(backups_root)
+        prune_backups(backups_root, protect=(stamp,))
+    if os.path.islink(destination) or not os.path.isdir(destination):
+        LOGGER.error("backup %s is gone after pruning, nothing will be "
+                     "applied", destination)
+        return None
     LOGGER.info("backup written to %s (%d path(s) left out)",
                 destination, len(skipped))
     return Backup(destination, len(skipped))
 
 
-def prune_backups(backups_root, keep=BACKUPS_KEPT):
-    """Delete all but the newest `keep` backups (names sort chronologically).
+def needs_full_backup(state_dir, now=None):
+    """True unless a full backup younger than FULL_BACKUP_INTERVAL exists.
+
+    Only a REAL directory named exactly like a stamp (so never a `-changes`
+    folder, never a symlink) that holds the sessions tree counts, and a stamp
+    in the future does not: a clock that jumped back must not stop full
+    backups for good.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    backups_root = os.path.join(state_dir, BACKUPS_DIRNAME)
+    try:
+        names = os.listdir(backups_root)
+    except OSError:
+        return True
+    for name in names:
+        if not STAMP_RE.match(name):
+            continue
+        path = os.path.join(backups_root, name)
+        tree = os.path.join(path, SESSIONS_DIRNAME)
+        if (os.path.islink(path) or not os.path.isdir(path)
+                or os.path.islink(tree) or not os.path.isdir(tree)):
+            continue
+        try:
+            stamp = datetime.datetime.strptime(name, STAMP_FORMAT).replace(
+                tzinfo=datetime.timezone.utc)
+        except ValueError:
+            continue
+        if datetime.timedelta(0) <= now - stamp < FULL_BACKUP_INTERVAL:
+            return False
+    return True
+
+
+def backup_changes(root, state_dir, paths, now=None):
+    """Save the current copy of every file in `paths` that exists right now.
+
+    The light backup between two full ones: the bytes and exact mtime of each
+    regular file a run is about to overwrite or delete, at its path relative to
+    root under `<stamp>-changes/claude-code-sessions/`. A symlink is never
+    followed and never copied. Returns Backup(destination, 0), Backup(None, 0)
+    when none of the paths existed (nothing to save, no folder made), or None
+    when anything went wrong — the run must then apply nothing, exactly as when
+    a full backup fails.
+    """
+    relative = []
+    for path in paths:
+        rel = os.path.relpath(path, root)
+        if (os.path.isabs(rel) or rel == os.curdir
+                or rel.split(os.sep)[0] == os.pardir):
+            LOGGER.error("backup: %s is outside the sessions root %s, nothing "
+                         "will be applied", path, root)
+            return None
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            LOGGER.error("backup: cannot look at %s (%s), nothing will be "
+                         "applied", path, error)
+            return None
+        if stat.S_ISREG(st.st_mode):
+            relative.append(rel)
+    if not relative:
+        return Backup(None, 0)
+    backups_root = os.path.join(state_dir, BACKUPS_DIRNAME)
+    stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime(
+        STAMP_FORMAT)
+    name = stamp + CHANGES_SUFFIX
+    destination = os.path.join(backups_root, name)
+    partial = os.path.join(backups_root, PARTIAL_PREFIX + name)
+    created = False
+    copied = 0
+    try:
+        try:
+            os.makedirs(backups_root, exist_ok=True)
+            os.makedirs(partial)
+            created = True
+            for rel in relative:
+                source = os.path.join(root, rel)
+                target = os.path.join(partial, SESSIONS_DIRNAME, rel)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                try:
+                    shutil.copy2(source, target, follow_symlinks=False)
+                except FileNotFoundError:
+                    # The app deleted it since it was listed: nothing to save,
+                    # exactly as for a file already missing at listing time.
+                    if os.path.lexists(source):
+                        raise
+                    continue
+                copied += 1
+            if copied:
+                os.rename(partial, destination)
+        except OSError as error:
+            LOGGER.error("backup of the files this run changes failed, nothing "
+                         "will be applied: %s", error)
+            # Before pruning, for the same reason as in take_backup. Only a
+            # folder this call made: an existing one of the same name is not
+            # ours to remove.
+            if created:
+                _force_rmtree(partial)
+            return None
+        if not copied:
+            _force_rmtree(partial)
+            return Backup(None, 0)
+    finally:
+        prune_backups(backups_root, changes_kept=CHANGES_KEPT,
+                      protect=(name,))
+    if os.path.islink(destination) or not os.path.isdir(destination):
+        LOGGER.error("backup %s is gone after pruning, nothing will be "
+                     "applied", destination)
+        return None
+    LOGGER.info("backup of %d changed file(s) written to %s",
+                copied, destination)
+    return Backup(destination, 0)
+
+
+def prune_backups(backups_root, keep=BACKUPS_KEPT, changes_kept=CHANGES_KEPT,
+                  protect=()):
+    """Keep the newest `keep` full backups and the newest `changes_kept`
+    `-changes` folders (names sort chronologically); delete the rest.
+
+    The two rings are counted apart, so a busy stretch of small changes
+    backups can never push the last full copy out, nor the reverse.
 
     R2-NB1: a SYMLINK named like a timestamp is not a backup. os.path.isdir
     follows links, so one used to be counted as a backup and then handed to
     _force_rmtree, whose chmod walk went straight through it and changed the
     modes of a tree outside the state directory entirely. Links are skipped and
-    reported, and they do not take up a slot in the ring either.
+    reported, and they do not take up a slot in either ring.
+
+    A full backup is recognised exactly as needs_full_backup does (a real
+    directory named a valid stamp), a change set as such a stamp followed by
+    CHANGES_SUFFIX; anything else is never removed and never takes a slot,
+    except a killed run's leftover — a real directory named PARTIAL_PREFIX
+    followed by one of those two names — which is removed.
+    A name in `protect` (the backup the caller just made) is never removed,
+    but still takes its slot in its ring.
     """
     try:
-        names = []
+        fulls, changes, doomed = [], [], []
         for name in sorted(os.listdir(backups_root)):
             path = os.path.join(backups_root, name)
             if os.path.islink(path):
                 LOGGER.warning("not touching %s: it is a symlink, not a backup "
                                "this tool wrote", path)
                 continue
-            if os.path.isdir(path):
-                names.append(name)
+            if not os.path.isdir(path):
+                continue
+            is_partial = name.startswith(PARTIAL_PREFIX)
+            bare = name[len(PARTIAL_PREFIX):] if is_partial else name
+            is_changes = bare.endswith(CHANGES_SUFFIX)
+            stamp = bare[:-len(CHANGES_SUFFIX)] if is_changes else bare
+            if not STAMP_RE.match(stamp):
+                continue
+            try:
+                datetime.datetime.strptime(stamp, STAMP_FORMAT)
+            except ValueError:
+                continue
+            if is_partial:
+                if name not in protect:
+                    doomed.append(name)
+                continue
+            (changes if is_changes else fulls).append(name)
     except OSError:
         return []
-    doomed = names[:-keep] if keep > 0 else names
+    for names, kept in ((fulls, keep), (changes, changes_kept)):
+        spared = [name for name in names if name in protect]
+        others = [name for name in names if name not in protect]
+        room = kept - len(spared)
+        doomed += others[:-room] if room > 0 else others
     removed = []
     for name in doomed:
         if _force_rmtree(os.path.join(backups_root, name)):
@@ -1061,7 +1232,10 @@ def sync_once(root, execute=False, state_dir=None):
     """Plan a sync and, when execute is set, apply it.
 
     A backup is taken only when the plan is non-empty and execute is set, so
-    a dry run and a converged tree both leave the state directory alone. The
+    a dry run and a converged tree both leave the state directory alone. It is
+    a full copy of the tree when none from the last FULL_BACKUP_INTERVAL
+    exists, and otherwise only the files this run overwrites or deletes —
+    which is nothing at all for a run that only adds files. The
     stale-temp-file sweep is the one thing an --execute run does even with
     nothing to apply: it holds the lock, so it is the only safe moment, and a
     converged tree is exactly where a leftover would otherwise sit for ever.
@@ -1073,11 +1247,19 @@ def sync_once(root, execute=False, state_dir=None):
     sweep_stale_temp_files(plan.leaves)
     if plan.is_empty():
         return SyncResult(plan=plan, backup=None, applied=None, backup_skipped=0)
-    backup = take_backup(root, state_dir or default_state_dir(),
-                         skip_paths=unreadable_paths(plan))
+    state_dir = state_dir or default_state_dir()
+    if needs_full_backup(state_dir):
+        backup = take_backup(root, state_dir, skip_paths=unreadable_paths(plan))
+    else:
+        backup = backup_changes(
+            root, state_dir,
+            [write.dest for write in plan.writes + plan.tombstone_copies]
+            + [delete.path for delete in plan.deletes])
     if backup is None:
         # No backup, no writes: the whole point of the backup is to be able to
-        # undo what comes after it. take_backup has already said why.
+        # undo what comes after it. take_backup or backup_changes has
+        # already said why. (A Backup whose path is None means nothing needed
+        # saving, and the run goes ahead.)
         return SyncResult(plan=plan, backup=None,
                           applied=empty_applied(errors=1), backup_skipped=0)
     applied = apply_plan(plan)
@@ -1373,6 +1555,9 @@ def build_parser():
                       help="report what would change and write nothing (default)")
     mode.add_argument("--execute", action="store_true",
                       help="actually write, after taking a backup")
+    sync.add_argument("--trim-logs", action="store_true",
+                      help="with --execute, also cut the agent's log files "
+                           "in ~/Library/Logs down to their newest lines")
 
     status = subparsers.add_parser(
         "status", help="list the leaves, their counts and the current drift")
@@ -1501,6 +1686,8 @@ def cmd_sync(args):
     guard = file_lock(state_dir) if execute else contextlib.nullcontext()
     try:
         with guard:
+            if execute and args.trim_logs:
+                trim_logs()
             result = sync_once(root, execute=execute, state_dir=state_dir)
     except LockHeld as held:
         LOGGER.error("another run is already running (pid %s, lock file %s); "
@@ -1605,6 +1792,10 @@ def describe_agent_state(target, loaded):
 SYSTEM_PYTHON = "/usr/bin/python3"
 DEFAULT_AGENTS_DIRNAME = os.path.join("Library", "LaunchAgents")
 LOGS_DIRNAME = os.path.join("Library", "Logs")
+# Nothing rotates the agent's two logs, so `sync --trim-logs` cuts one past
+# LOG_MAX_BYTES down to its newest LOG_KEEP_BYTES (whole lines only).
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_KEEP_BYTES = 512 * 1024
 
 
 def default_agents_dir(home=None):
@@ -1617,6 +1808,50 @@ def log_paths(home=None):
     logs = os.path.join(home, LOGS_DIRNAME)
     return (os.path.join(logs, LABEL + ".out.log"),
             os.path.join(logs, LABEL + ".err.log"))
+
+
+def trim_logs(home=None):
+    """Cut each agent log past LOG_MAX_BYTES to its newest whole lines.
+
+    Rewritten IN PLACE (tail written at offset 0, then truncate) rather than
+    replaced: launchd holds both files open in append mode, and an O_APPEND
+    writer keeps writing at the new end of the same inode, while a replaced file
+    would go on receiving output nobody can see. Only a regular file is touched,
+    never a symlink. Returns the paths trimmed; any failure is logged at debug
+    level and skipped, because a sync must never fail over its own log.
+    """
+    trimmed = []
+    for path in log_paths(home):
+        try:
+            if _trim_log(path):
+                trimmed.append(path)
+        except OSError as error:
+            LOGGER.debug("could not trim the log %s: %s", path, error)
+    return trimmed
+
+
+def _trim_log(path):
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
+    except FileNotFoundError:
+        return False
+    fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r+b") as handle:
+        st = os.fstat(handle.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size <= LOG_MAX_BYTES:
+            return False
+        # One byte more than the tail, to see whether the tail already starts a
+        # line; otherwise its first, partial line is dropped.
+        start = max(st.st_size - LOG_KEEP_BYTES - 1, 0)
+        handle.seek(start)
+        chunk = handle.read(st.st_size - start)
+        newline = chunk.find(b"\n")
+        tail = chunk[1:] if newline == -1 else chunk[newline + 1:]
+        handle.seek(0)
+        handle.write(tail)
+        handle.truncate()
+    return True
 
 
 def watch_paths(root, leaves):
@@ -1642,7 +1877,7 @@ def plist_dict(script_path, root, leaves, user_data=None, state_dir=None, home=N
     current leaf, so a brand-new account or org folder also fires the job (sync
     re-discovers leaves on every run regardless).
     """
-    argv = [SYSTEM_PYTHON, script_path, "sync", "--execute"]
+    argv = [SYSTEM_PYTHON, script_path, "sync", "--execute", "--trim-logs"]
     if user_data:
         argv += ["--user-data", user_data]
     if state_dir:

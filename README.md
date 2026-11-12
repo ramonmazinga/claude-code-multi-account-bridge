@@ -32,12 +32,18 @@ account; you use two Claude accounts on one Mac (a second Max or Pro
 subscription for when the first hits its weekly usage limit, a work Team seat
 and a personal plan) and each one only shows its own history.
 
-**Related tools.** [claude-transplant](https://github.com/vitaliyhayda/claude-transplant)
-*moves* session records to the account you are switching to, with an undo, so
-one account lists each session at a time. This bridge *merges* instead: both
-accounts always list every session, deletions and archive state carry across,
-and nothing has to be run at switch time. Pick by whether you want one list that
-follows you or two lists that stay identical.
+**Related tools.** Pick by what you want to happen at a switch:
+
+| Tool | What it does | Touches your sign-in |
+| --- | --- | --- |
+| this bridge | keeps every account's list identical, all the time, in the background; deletions and archive state carry across; nothing to run when you switch | never |
+| [claude-transplant](https://github.com/vitaliyhayda/claude-transplant) | *moves* session records to the account you are switching to, with an undo, so one account lists each session at a time | no |
+| [claude-account-switcher](https://github.com/SnlperStripes/claude-account-switcher) | a tray app that switches the account for you without signing out, copies the list into the account it switches to, and shows live usage | yes: it saves and restores each account's sign-in |
+| side-by-side launchers (hats, multi-claude, twindesk, ...) | run one copy of the app per account, each with its own data folder, to keep accounts *apart* | no |
+
+The launchers solve the opposite problem: they are for a work account and a
+personal account that must never mix. This bridge is for two accounts doing the
+*same* work, where you want one list whichever account you are signed into.
 
 ## What it does
 
@@ -153,7 +159,7 @@ python3 bridge.py uninstall-agent   # unload it and delete the plist
 leaf folder, `ThrottleInterval 5` and a `StartInterval 60` floor (a run every
 minute even when nothing changed on disk — switching accounts inside the app
 writes nothing, and a converged tree costs a run nothing), running
-`/usr/bin/python3 <repo>/bridge.py sync --execute`. All three levels are watched because launchd fires on a change
+`/usr/bin/python3 <repo>/bridge.py sync --execute --trim-logs`. All three levels are watched because launchd fires on a change
 to a watched folder's *own* contents: a new account shows up as a change to the
 root, but a new **org** folder under an account that already exists only shows
 up as a change to that account folder. `sync` re-discovers leaves on every run
@@ -167,11 +173,10 @@ permitted` on every run (measured). `install-agent` therefore copies `bridge.py`
 into `~/.claude-code-multi-account-bridge/` and points the job there. After you
 pull a new version, run `install-agent` again to refresh that copy.
 
-Those two log files are **append-only and never rotated** — launchd does not
-rotate them and neither does this tool. A quiet run writes one line, so they
-grow slowly, but if you leave the agent installed for months, truncate them
-yourself (`: > ~/Library/Logs/com.claude-code-multi-account-bridge.out.log`) or
-add them to a `newsyslog.d` rule.
+launchd never rotates those two log files, so the agent trims them itself:
+`--trim-logs` cuts a log that has passed 5 MB back to its newest 512 KB, at a
+line boundary, at the start of an agent run. An agent installed by an earlier
+version does not have the flag — run `install-agent` again to get it.
 
 `status` also reports the agent, and checks **both** halves: whether the plist
 is on disk and whether launchd actually has the job. A plist that is present but
@@ -219,11 +224,23 @@ For each session id found in any leaf folder:
   `--execute`. A dry run takes no lock and creates no state directory — it is
   the one command that still works while something else holds the lock, which
   is how you find out what is going on.
-- **A backup precedes the first write of a run.** The whole
+- **A backup precedes the first write of a run.** Once a day the whole
   `claude-code-sessions` tree is copied to
   `~/.claude-code-multi-account-bridge/backups/<UTC timestamp>/`, keeping the
-  newest 10, with every file's bytes and exact mtime preserved. No backup is
-  taken for a dry run, or when there is nothing to do. Anything this tool already
+  newest 10. Every other run that writes copies only the files it is about to
+  overwrite or remove, to `backups/<UTC timestamp>-changes/` at the same
+  relative paths, keeping the newest 1000. Every copy keeps the file's bytes and
+  exact mtime. (Earlier versions copied the whole tree before every writing run:
+  on the author's install that was 182 MB a time, hundreds of times a day, and
+  the ring of 10 covered only the last few minutes.) A `-changes` folder is the
+  previous copy of everything that run replaced or removed, so what the tool
+  overwrites can be got back for as long as that folder is among the newest
+  1000 (or a full copy still holds it); it does not list what the run added.
+  Both kinds are copied under a `.partial-` name and renamed when complete, so
+  a copy cut short by a logout or shutdown never passes for a backup. No backup is
+  taken for a dry run or when there is nothing to do; and a run that only adds
+  files that did not exist before has nothing to save, so on a day that already
+  has its full copy it makes no backup folder. Anything this tool already
   reported as **unreadable** — a record, a whole account/org folder, or a
   directory wearing a record's name that cannot be read either — is left out of
   the copy, named in the log and counted as `skipped` on the `backup:` line — otherwise a single
@@ -233,7 +250,8 @@ For each session id found in any leaf folder:
   half-written backup, applies nothing and exits non-zero.
 - **A symlink in the backups folder is not a backup.** One named like a
   timestamp is never chmod'd, never deleted and never counted against the
-  newest-10 ring.
+  newest-10 ring. Neither is a folder that is not named exactly like one of this
+  tool's timestamps: whatever else you keep in there is left alone.
 - **A lock file** (`~/.claude-code-multi-account-bridge/bridge.lock`) stops
   overlapping `--execute` runs; a second run exits 2 and names the file and the
   pid holding it. The pid is written into `bridge.lock.<pid>.tmp` first and the
@@ -284,8 +302,13 @@ For each session id found in any leaf folder:
   one holding the lock — a dry run and `status` sweep nothing). That sweep runs
   before the backup and even when there is nothing else to do, because a
   converged tree is exactly where a leftover would otherwise sit for ever.
-  Then: backups past the newest 10 (never a symlink), the lock file it claimed
-  itself, and — on `uninstall-agent` — its plist.
+  Then: full backups past the newest 10 and `-changes` folders past the newest
+  1000 (never a symlink), a `.partial-<timestamp>` or
+  `.partial-<timestamp>-changes` folder left in the backups folder by a run that
+  was killed mid-copy (never a symlink, and never a `.partial-` folder with any
+  other name), the oldest part of its own two log files once one
+  passes 5 MB, the lock file it claimed itself, and — on `uninstall-agent` —
+  its plist.
 
 ## Troubleshooting
 
@@ -357,9 +380,20 @@ as its own.
 
 - claude.ai chat history (server-side, and genuinely per account).
 - `scheduled-tasks.json`, `backlog/`, `spaces.json`, and every other
-  per-account file.
+  per-account file. [Zakaria Mehbi's fork](https://github.com/zakariamehbi/claude-code-multi-account-bridge)
+  goes further and also carries scheduled tasks, queued messages, session
+  presets and the sidebar layout across accounts; that is not in this repo yet,
+  because those files are rewritten whole by the running app and can only be
+  proven with the app closed.
 - The `local-agent-mode-sessions` tree — same layout, may be added later.
+- Signing in or out for you, and anything else that would read or store a
+  sign-in.
 - Live refresh of a running app.
+
+## Thanks
+
+The once-a-day full backup with per-run change sets, and the log trimming, follow
+the design in [Zakaria Mehbi's fork](https://github.com/zakariamehbi/claude-code-multi-account-bridge).
 
 ## Development
 

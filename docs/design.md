@@ -79,8 +79,8 @@ sessions are left untouched.
    unwritable leaf can hold the newest copy. A name that only looks like ours
    (`local_`/`deleted_` plus something that is not a canonical UUID) is counted
    as `ignored`. This is what makes the plan CONVERGE: an unconvergeable plan
-   means a full backup on every run and a temp file churned in the leaf every
-   run, which re-fires WatchPaths. A blocked record under a tombstone therefore
+   means a backup (a change set, and once a day a full copy) on every run and a
+   temp file churned in the leaf every run, which re-fires WatchPaths. A blocked record under a tombstone therefore
    stays on disk until it is unblocked; it shows up in the `blocked` count on
    every run, including one that reports no drift at all.
 6. **Idempotent.** A converged tree yields zero writes. Every run reports counts:
@@ -92,12 +92,27 @@ sessions are left untouched.
    unconditionally, drift or no drift, because a blocked path, a blocked leaf, a
    parse failure or an id mismatch can all sit in a tree with nothing to do.
 
-`--dry-run` is the default; `--execute` writes. Before the first write of a run,
-a backup of the entire `claude-code-sessions` tree is taken to
+`--dry-run` is the default; `--execute` writes. Before the first write of a run a
+backup is taken, in one of two forms. When no full backup exists from the last
+24 hours, the entire `claude-code-sessions` tree is copied to
 `~/.claude-code-multi-account-bridge/backups/<UTC timestamp>/` (keep the newest
 10, made writable before removal so a read-only directory inside one cannot
 strand it; a symlink named like a timestamp is not a backup, is never chmod'd or
-deleted, and does not occupy a slot in the ring). The backup leaves OUT exactly
+deleted, and does not occupy a slot in the ring; nor does any folder not named
+exactly like one of this tool's timestamps). Otherwise only the files the
+run is about to overwrite or delete are copied, bytes and mtime, to
+`backups/<UTC timestamp>-changes/claude-code-sessions/<same relative path>`
+(keep the newest 1000, a ring of its own: change sets never evict a full backup
+and the reverse); a run with nothing to save, because every destination is new,
+makes no folder. The reason is measured: a real tree is ~180 MB and a busy day
+has hundreds of writing runs, so a full copy per run wrote that much each time
+and left a ring of 10 covering minutes. A full backup dated in the future never
+counts as recent, and a run never prunes the folder it has just made, so a wrong
+clock cannot switch backups off. A failed change-set copy aborts the run exactly
+as a failed full copy does. Either kind is copied under a `.partial-<name>`
+folder and renamed into place only when complete: a copy killed partway
+(launchd's SIGTERM at logout or shutdown) never passes for a backup, and the
+next run's prune removes the leftover. The full backup leaves OUT exactly
 the paths discovery already reported as UNREADABLE — those records, those leaf
 directories, and a blocked non-regular path that cannot be read either (a
 mode-000 directory wearing a record's name) — each logged, counted on the
@@ -139,7 +154,9 @@ with `WatchPaths` on the `claude-code-sessions` root, every ACCOUNT directory an
 every current leaf, `ThrottleInterval 5` and a `StartInterval 60` floor (an
 account switch inside the app writes nothing to disk, so no WatchPaths event
 fires; a converged tree costs a run nothing), running `/usr/bin/python3
-<repo>/bridge.py sync --execute`. All three levels are needed because launchd
+<repo>/bridge.py sync --execute --trim-logs` (`--trim-logs` cuts either of the
+agent's two logs back to its newest 512 KB once it passes 5 MB, in place, so
+launchd's open append handle keeps working). All three levels are needed because launchd
 fires on a change to a watched directory's own contents: a new account changes
 the root, but a new org folder under an existing account only changes that
 account's directory. Sync re-discovers leaves on every run regardless, and the
@@ -188,8 +205,12 @@ than a write.
   delete time. Beyond that the tool removes only its own leftovers: stale
   `.bridge-tmp-*` files in EVERY leaf it read (regular files with that prefix
   only, never a directory or symlink, and only on an `--execute` run, which is
-  the only one that holds the lock — never in `status` or a dry run), backups
-  past the newest 10 (never a symlink), its lock file — and only the one it
-  claimed itself — and its plist on `uninstall-agent`.
-- The agent's two log files under `~/Library/Logs` are append-only and rotated by
-  nobody; a long-lived install needs an external truncation or newsyslog rule.
+  the only one that holds the lock — never in `status` or a dry run), full backups
+  past the newest 10 and change sets past the newest 1000 (never a symlink), a
+  `.partial-<timestamp>` or `.partial-<timestamp>-changes` folder a killed run
+  left in the backups folder (never a symlink, never a `.partial-` folder with
+  any other name), its lock file — and only the one it claimed itself — and its plist on
+  `uninstall-agent`.
+- The agent's two log files under `~/Library/Logs` are trimmed by the agent's own
+  runs (`--trim-logs`); launchd never rotates them.
+- Never reads, stores or sends a sign-in.
